@@ -16,10 +16,9 @@ import (
 	"github.com/bluesky-social/indigo/events"
 	lexutil "github.com/bluesky-social/indigo/lex/util"
 	"github.com/bluesky-social/indigo/repo"
-	"github.com/bluesky-social/indigo/util"
-	"github.com/haileyok/cocoon/blockstore"
 	"github.com/haileyok/cocoon/internal/db"
 	"github.com/haileyok/cocoon/models"
+	"github.com/haileyok/cocoon/recording_blockstore"
 	blocks "github.com/ipfs/go-block-format"
 	"github.com/ipfs/go-cid"
 	cbor "github.com/ipfs/go-ipld-cbor"
@@ -103,8 +102,9 @@ func (rm *RepoMan) applyWrites(urepo models.Repo, writes []Op, swapCommit *strin
 		return nil, err
 	}
 
-	dbs := blockstore.New(urepo.Did, rm.db)
-	r, err := repo.OpenRepo(context.TODO(), dbs, rootcid)
+	dbs := rm.s.getBlockstore(urepo.Did)
+	bs := recording_blockstore.New(dbs)
+	r, err := repo.OpenRepo(context.TODO(), bs, rootcid)
 
 	entries := []models.Record{}
 	var results []ApplyWriteResult
@@ -138,6 +138,12 @@ func (rm *RepoMan) applyWrites(urepo models.Repo, writes []Op, swapCommit *strin
 				return nil, err
 			}
 			mm := MarshalableMap(out)
+
+			// HACK: if a record doesn't contain a $type, we can manually set it here based on the op's collection
+			if mm["$type"] == "" {
+				mm["$type"] = op.Collection
+			}
+
 			nc, err := r.PutRecord(context.TODO(), op.Collection+"/"+*op.Rkey, &mm)
 			if err != nil {
 				return nil, err
@@ -274,7 +280,7 @@ func (rm *RepoMan) applyWrites(urepo models.Repo, writes []Op, swapCommit *strin
 		}
 	}
 
-	for _, op := range dbs.GetLog() {
+	for _, op := range bs.GetWriteLog() {
 		if _, err := carstore.LdWrite(buf, op.Cid().Bytes(), op.RawData()); err != nil {
 			return nil, err
 		}
@@ -318,13 +324,13 @@ func (rm *RepoMan) applyWrites(urepo models.Repo, writes []Op, swapCommit *strin
 			Rev:    rev,
 			Since:  &urepo.Rev,
 			Commit: lexutil.LexLink(newroot),
-			Time:   time.Now().Format(util.ISO8601),
+			Time:   time.Now().Format(time.RFC3339Nano),
 			Ops:    ops,
 			TooBig: false,
 		},
 	})
 
-	if err := dbs.UpdateRepo(context.TODO(), newroot, rev); err != nil {
+	if err := rm.s.UpdateRepo(context.TODO(), urepo.Did, newroot, rev); err != nil {
 		return nil, err
 	}
 
@@ -345,8 +351,8 @@ func (rm *RepoMan) getRecordProof(urepo models.Repo, collection, rkey string) (c
 		return cid.Undef, nil, err
 	}
 
-	dbs := blockstore.New(urepo.Did, rm.db)
-	bs := util.NewLoggingBstore(dbs)
+	dbs := rm.s.getBlockstore(urepo.Did)
+	bs := recording_blockstore.New(dbs)
 
 	r, err := repo.OpenRepo(context.TODO(), bs, c)
 	if err != nil {
@@ -358,7 +364,7 @@ func (rm *RepoMan) getRecordProof(urepo models.Repo, collection, rkey string) (c
 		return cid.Undef, nil, err
 	}
 
-	return c, bs.GetLoggedBlocks(), nil
+	return c, bs.GetReadLog(), nil
 }
 
 func (rm *RepoMan) incrementBlobRefs(urepo models.Repo, cbor []byte) ([]cid.Cid, error) {
@@ -414,10 +420,10 @@ func getBlobCidsFromCbor(cbor []byte) ([]cid.Cid, error) {
 		return nil, fmt.Errorf("error unmarshaling cbor: %w", err)
 	}
 
-	var deepiter func(interface{}) error
-	deepiter = func(item interface{}) error {
+	var deepiter func(any) error
+	deepiter = func(item any) error {
 		switch val := item.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if val["$type"] == "blob" {
 				if ref, ok := val["ref"].(string); ok {
 					c, err := cid.Parse(ref)
@@ -430,7 +436,7 @@ func getBlobCidsFromCbor(cbor []byte) ([]cid.Cid, error) {
 					return deepiter(v)
 				}
 			}
-		case []interface{}:
+		case []any:
 			for _, v := range val {
 				deepiter(v)
 			}

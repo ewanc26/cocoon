@@ -38,6 +38,7 @@ import (
 	"github.com/haileyok/cocoon/oauth/dpop"
 	"github.com/haileyok/cocoon/oauth/provider"
 	"github.com/haileyok/cocoon/plc"
+	"github.com/ipfs/go-cid"
 	echo_session "github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -103,20 +104,20 @@ type Args struct {
 
 	SessionSecret string
 
-	DefaultAtprotoProxy string
+	BlockstoreVariant BlockstoreVariant
 }
 
 type config struct {
-	Version             string
-	Did                 string
-	Hostname            string
-	ContactEmail        string
-	EnforcePeering      bool
-	Relays              []string
-	AdminPassword       string
-	SmtpEmail           string
-	SmtpName            string
-	DefaultAtprotoProxy string
+	Version           string
+	Did               string
+	Hostname          string
+	ContactEmail      string
+	EnforcePeering    bool
+	Relays            []string
+	AdminPassword     string
+	SmtpEmail         string
+	SmtpName          string
+	BlockstoreVariant BlockstoreVariant
 }
 
 type CustomValidator struct {
@@ -339,16 +340,16 @@ func New(args *Args) (*Server, error) {
 		plcClient:  plcClient,
 		privateKey: &pkey,
 		config: &config{
-			Version:             args.Version,
-			Did:                 args.Did,
-			Hostname:            args.Hostname,
-			ContactEmail:        args.ContactEmail,
-			EnforcePeering:      false,
-			Relays:              args.Relays,
-			AdminPassword:       args.AdminPassword,
-			SmtpName:            args.SmtpName,
-			SmtpEmail:           args.SmtpEmail,
-			DefaultAtprotoProxy: args.DefaultAtprotoProxy,
+			Version:           args.Version,
+			Did:               args.Did,
+			Hostname:          args.Hostname,
+			ContactEmail:      args.ContactEmail,
+			EnforcePeering:    false,
+			Relays:            args.Relays,
+			AdminPassword:     args.AdminPassword,
+			SmtpName:          args.SmtpName,
+			SmtpEmail:         args.SmtpEmail,
+			BlockstoreVariant: args.BlockstoreVariant,
 		},
 		evtman:   events.NewEventManager(events.NewMemPersister()),
 		passport: identity.NewPassport(h, identity.NewMemCache(10_000)),
@@ -640,4 +641,12 @@ func (s *Server) backupRoutine() {
 	for range ticker.C {
 		go s.doBackup()
 	}
+}
+
+func (s *Server) UpdateRepo(ctx context.Context, did string, root cid.Cid, rev string) error {
+	if err := s.db.Exec("UPDATE repos SET root = ?, rev = ? WHERE did = ?", nil, root.Bytes(), rev, did).Error; err != nil {
+		return err
+	}
+
+	return nil
 }
